@@ -79,9 +79,67 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # ---------- routing ----------
     def do_POST(self):
         if self.path.rstrip("/") in ("/v1/chat/completions", "/chat/completions"):
-            self._handle_chat_completions()
+            self._handle_chat_completions_mock()
+            # self._handle_chat_completions()
         else:
             self._json_error(404, f"Not found: {self.path}")
+
+    def _handle_chat_completions_mock(self):
+        try:
+            body = self._read_body()
+        except Exception as e:
+            self._json_error(400, f"Bad request body: {e}")
+            return
+            
+        import uuid
+        import time
+        import json
+        
+        response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        created_time = int(time.time())
+        is_stream = body.get("stream", False)
+        
+        if is_stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            
+            chunk = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": "llm-client-bridge-mock",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "hey this should work (stream)"},
+                    "finish_reason": "stop"
+                }]
+            }
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+        else:
+            response = {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": created_time,
+                "model": "llm-client-bridge-mock",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "hey this should work (sync)"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 10,
+                    "total_tokens": 20,
+                },
+            }
+            self._send_json(200, response)
 
     def do_GET(self):
         if self.path.rstrip("/") in ("/v1/models", "/models", "/health", "/"):
@@ -219,20 +277,70 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if tool_calls_out:
             choice["message"]["tool_calls"] = tool_calls_out
 
-        response = {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": "llm-client-bridge",
-            "choices": [choice],
-            "usage": {
-                "prompt_tokens": len(user_prompt.split()),
-                "completion_tokens": len(raw_response.split()),
-                "total_tokens": len(user_prompt.split()) + len(raw_response.split()),
-            },
-        }
+        response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        created_time = int(time.time())
+        is_stream = body.get("stream", False)
+        
+        if is_stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            
+            if tool_calls_out:
+                chunk_tool_calls = []
+                for i, tc in enumerate(tool_calls_out):
+                    chunk_tool_calls.append({
+                        "index": i,
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"]
+                        }
+                    })
+                chunk = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": "llm-client-bridge",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "tool_calls": chunk_tool_calls},
+                        "finish_reason": "tool_calls"
+                    }]
+                }
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            else:
+                chunk = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": "llm-client-bridge",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": final_content},
+                        "finish_reason": "stop"
+                    }]
+                }
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
 
-        self._send_json(200, response)
+            self.wfile.write(b"data: [DONE]\n\n")
+        else:
+            response = {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": created_time,
+                "model": "llm-client-bridge",
+                "choices": [choice],
+                "usage": {
+                    "prompt_tokens": len(user_prompt.split()),
+                    "completion_tokens": len(raw_response.split()),
+                    "total_tokens": len(user_prompt.split()) + len(raw_response.split()),
+                },
+            }
+            self._send_json(200, response)
 
     # ---------- tool call parsing ----------
     @staticmethod
