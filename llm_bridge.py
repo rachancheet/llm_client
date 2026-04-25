@@ -121,8 +121,8 @@ def health_check():
 @app.route("/chat/completions", methods=["POST"])
 def chat_completions():
     # To use the real LLM, uncomment the line below and comment out the mock:
-    return _handle_chat_completions_mock()
-    # return _handle_chat_completions()
+    # return _handle_chat_completions_mock()
+    return _handle_chat_completions()
 
 def _handle_chat_completions_mock():
     body = request.json or {}
