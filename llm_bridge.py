@@ -133,14 +133,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
         elapsed = time.time() - t0
         logger.info("Bridge response in %.2fs: %d chars", elapsed, len(raw_response))
 
-        # Try to detect tool calls in the response
+        # Try to detect tool calls in the response.
+        # Always attempt parsing — OpenClaw injects tool definitions into the
+        # system prompt text rather than the request body's `tools` array,
+        # so we can't rely on `tools` being non-empty.
         tool_calls_out = []
         final_content = raw_response
-        if tools:
-            parsed_tool_calls = self._try_parse_tool_calls(raw_response)
-            if parsed_tool_calls:
-                tool_calls_out = parsed_tool_calls
-                final_content = ""  # tool-call responses have no text content
+        parsed_tool_calls = self._try_parse_tool_calls(raw_response)
+        if parsed_tool_calls:
+            tool_calls_out = parsed_tool_calls
+            final_content = ""  # tool-call responses have no text content
 
         # Build OpenAI-format response
         choice = {

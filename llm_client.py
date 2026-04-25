@@ -176,7 +176,7 @@ class RateLimitedLLMClient:
 
     def _get_client(self, key):
         if key not in self._clients:
-            self._clients[key] = genai.Client(api_key=key, http_options={'timeout': 90.0})
+            self._clients[key] = genai.Client(api_key=key, http_options={'timeout': 90000.0})
         return self._clients[key]
 
     # --------------------------------------------------
