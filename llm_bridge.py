@@ -102,9 +102,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         messages = body.get("messages", [])
         last_role = messages[-1].get("role") if messages else ""
         
+        logger.info(f"[MOCK] Received request: stream={is_stream}, messages_count={len(messages)}, last_role={last_role}")
+        logger.info(f"[MOCK] Full messages received:\n{json.dumps(messages, indent=2)}")
+        
         if last_role == "tool":
             tool_calls_out = []
             final_content = "I successfully received the tool execution result! Everything works."
+            logger.info("[MOCK] Action: Returning success text because last_role was 'tool'")
         else:
             tool_calls_out = [{
                 "id": "call_mock123",
@@ -115,7 +119,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 }
             }]
             final_content = ""
-
+            logger.info("[MOCK] Action: Returning 'write' tool call because last_role was NOT 'tool'")
+        
+        logger.info(f"[MOCK] Preparing response... Stream mode: {is_stream}")
+        
         if is_stream:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
