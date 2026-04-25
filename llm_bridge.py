@@ -1,0 +1,256 @@
+"""
+OpenAI-compatible HTTP bridge for llm_client.py
+
+Exposes POST /v1/chat/completions so PicoClaw's Go code can use
+the Python-based RateLimitedLLMClient (with Gemini key rotation,
+rate limiting, and retry logic) as a standard OpenAI-compat provider.
+
+Run:  python llm_bridge.py
+Listens on http://0.0.0.0:5099/v1/chat/completions
+"""
+
+import json
+import logging
+import time
+import uuid
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+from llm_client import llm_completion
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("llm_bridge")
+
+BRIDGE_PORT = 5099
+
+
+class BridgeHandler(BaseHTTPRequestHandler):
+    """Minimal OpenAI chat/completions endpoint backed by llm_client."""
+
+    def log_message(self, fmt, *args):
+        logger.debug(fmt, *args)
+
+    # ---------- routing ----------
+    def do_POST(self):
+        if self.path.rstrip("/") in ("/v1/chat/completions", "/chat/completions"):
+            self._handle_chat_completions()
+        else:
+            self._json_error(404, f"Not found: {self.path}")
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("/v1/models", "/models", "/health", "/"):
+            self._send_json(200, {"status": "ok", "models": ["llm-client-bridge"]})
+        else:
+            self._json_error(404, f"Not found: {self.path}")
+
+    # ---------- core ----------
+    def _handle_chat_completions(self):
+        try:
+            body = self._read_body()
+        except Exception as e:
+            self._json_error(400, f"Bad request body: {e}")
+            return
+
+        messages = body.get("messages", [])
+        if not messages:
+            self._json_error(400, "messages is required")
+            return
+
+        # Build a single prompt string from the messages array.
+        # Separate system message from the rest for llm_client's `system` arg.
+        system_parts = []
+        conversation_parts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            # content can be a list of content blocks (vision format)
+            if isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                content = "\n".join(text_parts)
+
+            if role == "system":
+                system_parts.append(content)
+            elif role == "assistant":
+                conversation_parts.append(f"[Assistant]\n{content}")
+            elif role == "tool":
+                tool_call_id = msg.get("tool_call_id", "unknown")
+                conversation_parts.append(
+                    f"[Tool Result for {tool_call_id}]\n{content}"
+                )
+            else:
+                conversation_parts.append(f"[User]\n{content}")
+
+        system_prompt = "\n\n".join(system_parts) if system_parts else None
+        user_prompt = "\n\n".join(conversation_parts)
+
+        # Extract tool definitions if present and append them to system prompt
+        tools = body.get("tools", [])
+        if tools:
+            tool_descriptions = []
+            for tool in tools:
+                if tool.get("type") == "function":
+                    func = tool.get("function", {})
+                    name = func.get("name", "")
+                    desc = func.get("description", "")
+                    params = json.dumps(func.get("parameters", {}), indent=2)
+                    tool_descriptions.append(
+                        f"### {name}\n{desc}\nParameters:\n```json\n{params}\n```"
+                    )
+
+            tools_section = (
+                "\n\n## Available Tools\n"
+                "You may call tools by responding with a JSON object in this exact format:\n"
+                '```json\n{"tool_calls": [{"name": "<tool_name>", "arguments": {<args>}}]}\n```\n'
+                "If you want to call a tool, your ENTIRE response must be that JSON object and nothing else.\n\n"
+                + "\n\n".join(tool_descriptions)
+            )
+            if system_prompt:
+                system_prompt += tools_section
+            else:
+                system_prompt = tools_section
+
+        logger.info(
+            "Bridge request: %d messages, system=%d chars, prompt=%d chars, tools=%d",
+            len(messages),
+            len(system_prompt or ""),
+            len(user_prompt),
+            len(tools),
+        )
+
+        t0 = time.time()
+        try:
+            raw_response = llm_completion(user_prompt, system=system_prompt)
+        except Exception as e:
+            logger.error("llm_completion failed: %s", e)
+            self._json_error(502, f"LLM backend error: {e}")
+            return
+        elapsed = time.time() - t0
+        logger.info("Bridge response in %.2fs: %d chars", elapsed, len(raw_response))
+
+        # Try to detect tool calls in the response
+        tool_calls_out = []
+        final_content = raw_response
+        if tools:
+            parsed_tool_calls = self._try_parse_tool_calls(raw_response)
+            if parsed_tool_calls:
+                tool_calls_out = parsed_tool_calls
+                final_content = ""  # tool-call responses have no text content
+
+        # Build OpenAI-format response
+        choice = {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": final_content if not tool_calls_out else None,
+            },
+            "finish_reason": "tool_calls" if tool_calls_out else "stop",
+        }
+        if tool_calls_out:
+            choice["message"]["tool_calls"] = tool_calls_out
+
+        response = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "llm-client-bridge",
+            "choices": [choice],
+            "usage": {
+                "prompt_tokens": len(user_prompt.split()),
+                "completion_tokens": len(raw_response.split()),
+                "total_tokens": len(user_prompt.split()) + len(raw_response.split()),
+            },
+        }
+
+        self._send_json(200, response)
+
+    # ---------- tool call parsing ----------
+    @staticmethod
+    def _try_parse_tool_calls(text: str) -> list[dict] | None:
+        """
+        Attempt to extract tool_calls from the LLM's raw text response.
+        Returns OpenAI-format tool_calls list, or None if not a tool call.
+        """
+        import re
+
+        # Try to find JSON with tool_calls key
+        # First try: the whole response is JSON
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            # Strip markdown code fences
+            stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+            stripped = re.sub(r"\s*```$", "", stripped)
+            stripped = stripped.strip()
+
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            # Try to extract JSON block
+            match = re.search(r"\{.*\}", stripped, re.DOTALL)
+            if not match:
+                return None
+            try:
+                parsed = json.loads(match.group())
+            except json.JSONDecodeError:
+                return None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        raw_calls = parsed.get("tool_calls")
+        if not raw_calls or not isinstance(raw_calls, list):
+            return None
+
+        result = []
+        for i, call in enumerate(raw_calls):
+            name = call.get("name", "")
+            args = call.get("arguments", {})
+            if not name:
+                continue
+            result.append({
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
+                },
+            })
+
+        return result if result else None
+
+    # ---------- helpers ----------
+    def _read_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        return json.loads(raw) if raw else {}
+
+    def _send_json(self, status: int, data: dict):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json_error(self, status: int, message: str):
+        self._send_json(status, {"error": {"message": message, "type": "bridge_error"}})
+
+
+def main():
+    server = HTTPServer(("0.0.0.0", BRIDGE_PORT), BridgeHandler)
+    logger.info("LLM Bridge listening on http://0.0.0.0:%d", BRIDGE_PORT)
+    logger.info("PicoClaw endpoint: http://localhost:%d/v1/chat/completions", BRIDGE_PORT)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logger.info("Shutting down bridge...")
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
