@@ -107,6 +107,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         
         if last_role == "tool":
             tool_calls_out = []
+            
             final_content = "I successfully received the tool execution result! Everything works."
             logger.info("[MOCK] Action: Returning success text because last_role was 'tool'")
         else:
@@ -121,91 +122,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
             final_content = ""
             logger.info("[MOCK] Action: Returning 'write' tool call because last_role was NOT 'tool'")
         
-        logger.info(f"[MOCK] Preparing response... Stream mode: {is_stream}")
-        
-        if is_stream:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
-            
-            if tool_calls_out:
-                chunk1 = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": "llm-client-bridge-mock",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_mock123", "type": "function", "function": {"name": "write", "arguments": "{\"path\": \"dilly_dally_mock.txt\", \"content\": \"hello from mock!\"}"}}]},
-                        "finish_reason": None
-                    }]
-                }
-                chunk2 = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": "llm-client-bridge-mock",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "tool_calls"
-                    }]
-                }
-            else:
-                chunk1 = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": "llm-client-bridge-mock",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": final_content},
-                        "finish_reason": None
-                    }]
-                }
-                chunk2 = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": "llm-client-bridge-mock",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop"
-                    }]
-                }
-                
-            self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode('utf-8'))
-            self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode('utf-8'))
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-        else:
-            choice = {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": final_content if not tool_calls_out else None,
-                },
-                "finish_reason": "tool_calls" if tool_calls_out else "stop",
-            }
-            if tool_calls_out:
-                choice["message"]["tool_calls"] = tool_calls_out
+        choice = {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": final_content if not tool_calls_out else None,
+            },
+            "finish_reason": "tool_calls" if tool_calls_out else "stop",
+        }
+        if tool_calls_out:
+            choice["message"]["tool_calls"] = tool_calls_out
 
-            response = {
-                "id": response_id,
-                "object": "chat.completion",
-                "created": created_time,
-                "model": "llm-client-bridge-mock",
-                "choices": [choice],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 10,
-                    "total_tokens": 20,
-                },
-            }
-            self._send_json(200, response)
+        response = {
+            "id": response_id,
+            "object": "chat.completion",
+            "created": created_time,
+            "model": "llm-client-bridge-mock",
+            "choices": [choice],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 10,
+                "total_tokens": 20,
+            },
+        }
+        self._send_json(200, response)
 
     def do_GET(self):
         if self.path.rstrip("/") in ("/v1/models", "/models", "/health", "/"):
@@ -345,93 +285,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         created_time = int(time.time())
-        is_stream = body.get("stream", False)
-        
-        if is_stream:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
-            
-            if tool_calls_out:
-                chunk_tool_calls = []
-                for i, tc in enumerate(tool_calls_out):
-                    chunk_tool_calls.append({
-                        "index": i,
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["function"]["name"],
-                            "arguments": tc["function"]["arguments"]
-                        }
-                    })
-                chunk1 = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": "llm-client-bridge",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"role": "assistant", "tool_calls": chunk_tool_calls},
-                        "finish_reason": None
-                    }]
-                }
-                chunk2 = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": "llm-client-bridge",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "tool_calls"
-                    }]
-                }
-                self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode('utf-8'))
-                self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode('utf-8'))
-            else:
-                chunk1 = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": "llm-client-bridge",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"role": "assistant", "content": final_content},
-                        "finish_reason": None
-                    }]
-                }
-                chunk2 = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": "llm-client-bridge",
-                    "choices": [{
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop"
-                    }]
-                }
-                self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode('utf-8'))
-                self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode('utf-8'))
-
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-        else:
-            response = {
-                "id": response_id,
-                "object": "chat.completion",
-                "created": created_time,
-                "model": "llm-client-bridge",
-                "choices": [choice],
-                "usage": {
-                    "prompt_tokens": len(user_prompt.split()),
-                    "completion_tokens": len(raw_response.split()),
-                    "total_tokens": len(user_prompt.split()) + len(raw_response.split()),
-                },
-            }
-            self._send_json(200, response)
+        response = {
+            "id": response_id,
+            "object": "chat.completion",
+            "created": created_time,
+            "model": "llm-client-bridge",
+            "choices": [choice],
+            "usage": {
+                "prompt_tokens": len(user_prompt.split()),
+                "completion_tokens": len(raw_response.split()),
+                "total_tokens": len(user_prompt.split()) + len(raw_response.split()),
+            },
+        }
+        self._send_json(200, response)
 
     # ---------- tool call parsing ----------
     @staticmethod
