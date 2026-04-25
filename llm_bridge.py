@@ -113,8 +113,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "model": "llm-client-bridge-mock",
                 "choices": [{
                     "index": 0,
-                    "delta": {"role": "assistant", "content": "hey this should work (stream)"},
-                    "finish_reason": "stop"
+                    "delta": {
+                        "role": "assistant", 
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_mock123",
+                            "type": "function",
+                            "function": {
+                                "name": "write",
+                                "arguments": "{\"path\": \"dilly_dally_mock.txt\", \"content\": \"hello from mock!\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
                 }]
             }
             self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
@@ -129,9 +140,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": "hey this should work (sync)"
+                        "tool_calls": [{
+                            "id": "call_mock123",
+                            "type": "function",
+                            "function": {
+                                "name": "write",
+                                "arguments": "{\"path\": \"dilly_dally_mock.txt\", \"content\": \"hello from mock!\"}"
+                            }
+                        }]
                     },
-                    "finish_reason": "stop"
+                    "finish_reason": "tool_calls"
                 }],
                 "usage": {
                     "prompt_tokens": 10,
