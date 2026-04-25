@@ -2,13 +2,14 @@
 
 An ultra-lightweight, OpenAI-compatible HTTP bridge that allows any agent framework (like OpenClaw or PicoClaw) to use **free Google Gemini inference** with full tool-calling and streaming support.
 
+<img width="1758" height="186" alt="image" src="https://github.com/user-attachments/assets/81527a56-a300-4b54-b785-d2c9343ac9f1" />
+
+
 ## Why is this needed?
 The Google Gemini/Gemma models available in AI Studio offer incredibly generous free tiers and rate limits, making them perfect for powering local, always-on AI agents. However, many of the smaller or open-weights models (like Gemma) do not officially support native OpenAI-compatible tool calling, making them incompatible with major agent frameworks. 
 
 This bridge sits between your agent and the Google API. It takes standard OpenAI tool definitions, injects them into the model's system prompt, forces the LLM to output strictly-typed JSON using Google's Structured Output functionality, and translates that JSON back into a flawless OpenAI `tool_calls` response. To the agent, it looks exactly like you are talking to GPT-4!
 
-
-### Free Tier Limits (AI Studio)
 
 
 ## Features
