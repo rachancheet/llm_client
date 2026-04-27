@@ -16,7 +16,7 @@ import uuid
 import re
 from flask import Flask, request, jsonify, Response, stream_with_context
 
-from llm_client import llm_completion, llm_completion_structured, llm_completion_raw
+from llm_client import llm_completion_raw
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 from google.genai import types
@@ -102,14 +102,25 @@ def _handle_chat_completions():
 
     for msg in messages:
         role = msg.get("role")
-        content = msg.get("content", "")
+        raw_content = msg.get("content", "")
+        
+        if isinstance(raw_content, list):
+            text_content = "".join([item.get("text", "") for item in raw_content if isinstance(item, dict) and item.get("type") == "text"])
+            user_parts = []
+            for item in raw_content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    user_parts.append(types.Part.from_text(text=item.get("text", "")))
+        else:
+            text_content = raw_content
+            user_parts = [types.Part.from_text(text=raw_content)]
+
         if role == "system":
             if system_instruction:
-                system_instruction += "\n" + content
+                system_instruction += "\n" + text_content
             else:
-                system_instruction = content
+                system_instruction = text_content
         elif role == "user":
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=content)]))
+            contents.append(types.Content(role="user", parts=user_parts))
         elif role == "assistant":
             parts = []
             if "tool_calls" in msg:
@@ -122,16 +133,16 @@ def _handle_chat_completions():
                         name=tc["function"]["name"],
                         args=args
                     ))
-            if content:
-                parts.append(types.Part.from_text(text=content))
+            if text_content:
+                parts.append(types.Part.from_text(text=text_content))
             if parts:
                 contents.append(types.Content(role="model", parts=parts))
         elif role == "tool":
             name = msg.get("name", "unknown")
             try:
-                resp = json.loads(content)
+                resp = json.loads(text_content)
             except:
-                resp = {"result": content}
+                resp = {"result": text_content}
                 
             contents.append(types.Content(role="user", parts=[
                 types.Part.from_function_response(
