@@ -30,7 +30,7 @@ LLM_REQUESTS_PER_MINUTE: list[int] = _csv_int_list("LLM_REQUESTS_PER_MINUTE", "1
 LLM_TOKENS_PER_MINUTE: list[int] = _csv_int_list("LLM_TOKENS_PER_MINUTE", "99999999")
 LLM_REQUESTS_PER_DAY: list[int] = _csv_int_list("LLM_REQUESTS_PER_DAY", "1500")
 LLM_MAX_CONSECUTIVE_FAILURES: list[int] = _csv_int_list("LLM_MAX_CONSECUTIVE_FAILURES", "5")
-LLM_RETRY_DELAY_SECONDS: int = int(os.getenv("LLM_RETRY_DELAY_SECONDS", "60"))
+LLM_RETRY_DELAY_SECONDS: int = int(os.getenv("LLM_RETRY_DELAY_SECONDS", "80"))
 
 # Pad lists to match LLM_MODELS length (repeat last value)
 for _lst_name in ("LLM_REQUESTS_PER_MINUTE", "LLM_TOKENS_PER_MINUTE",
