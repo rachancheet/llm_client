@@ -135,7 +135,7 @@ class RateLimitedLLMClient:
 
     def _get_client(self, key):
         if key not in self._clients:
-            self._clients[key] = genai.Client(api_key=key, http_options={'timeout': 180000.0})
+            self._clients[key] = genai.Client(api_key=key, http_options={'timeout': 180000})
         return self._clients[key]
 
     # --------------------------------------------------
@@ -231,7 +231,7 @@ class RateLimitedLLMClient:
                             automatic_function_calling=types.AutomaticFunctionCallingConfig(
                                 disable=True
                             ) if tools else None,
-                            http_options={"timeout": 180}
+                            http_options={"timeout": 180000}
                         )
                         if system_instruction:
                             gen_config.system_instruction = system_instruction
