@@ -23,6 +23,7 @@ from config import (
     LLM_TOKENS_PER_MINUTE,
     LLM_REQUESTS_PER_DAY,
     LLM_MAX_CONSECUTIVE_FAILURES,
+    LLM_RETRY_DELAY_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,8 +130,8 @@ class RateLimitedLLMClient:
     # --------------------------------------------------
     # KEY MANAGEMENT
     # --------------------------------------------------
-    def _get_random_key(self):
-        return random.choice(self._api_keys) if self._api_keys else None
+    # def _get_random_key(self):
+    #     return random.choice(self._api_keys) if self._api_keys else None
 
     def _get_client(self, key):
         if key not in self._clients:
@@ -229,7 +230,8 @@ class RateLimitedLLMClient:
                             temperature=0.0,
                             automatic_function_calling=types.AutomaticFunctionCallingConfig(
                                 disable=True
-                            ) if tools else None
+                            ) if tools else None,
+                            http_options={"timeout": 180}
                         )
                         if system_instruction:
                             gen_config.system_instruction = system_instruction
@@ -263,8 +265,8 @@ class RateLimitedLLMClient:
                 max_allowed = max(LLM_MAX_CONSECUTIVE_FAILURES) if LLM_MAX_CONSECUTIVE_FAILURES else 5
                 if consecutive_round_failures >= max_allowed:
                     raise LLMFatalError(f"All keys/models failed {consecutive_round_failures} rounds in a row. Giving up.")
-                logger.warning(f"All permutations failed (round {consecutive_round_failures}/{max_allowed}). Waiting 60s before retrying...")
-                time.sleep(60)
+                logger.warning(f"All permutations failed (round {consecutive_round_failures}/{max_allowed}). Waiting {LLM_RETRY_DELAY_SECONDS}s before retrying...")
+                time.sleep(LLM_RETRY_DELAY_SECONDS)
 
     def completion(self, prompt: str, system: str = None) -> str:
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
