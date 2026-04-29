@@ -10,94 +10,84 @@
 
 **Solution:** A Python HTTP bridge server (`llm_bridge.py`) that:
 1. Exposes an **OpenAI-compatible** `/v1/chat/completions` endpoint on `http://localhost:5099`
-2. Translates incoming OpenAI-format chat requests into calls to `llm_client.py`'s `llm_completion()` function
-3. Returns OpenAI-format responses back to the caller (OpenClaw/PicoClaw)
+2. Translates incoming OpenAI-format chat requests (including tools and streaming) into calls to `llm_client.py`'s `llm_completion_raw()` function.
+3. Returns OpenAI-format responses (supporting text, tool calls, and SSE streaming) back to the caller (OpenClaw/PicoClaw).
 
 This allows OpenClaw to connect to the bridge as a standard `openai`-protocol provider without any native code changes.
 
 ```text
 ┌─────────────┐     OpenAI HTTP     ┌──────────────┐     Python calls     ┌────────────────┐     Gemini SDK     ┌──────────────┐
 │  OpenClaw    │ ──────────────────► │  llm_bridge   │ ──────────────────► │  llm_client    │ ────────────────► │  Google API  │
-│  (Framework) │  POST /v1/chat/    │  (Python HTTP) │    llm_completion() │  (Rate-limited) │                   │  (Gemini)    │
-│              │  completions       │  :5099         │                     │  Key rotation   │                   │              │
+│  (Framework) │  POST /v1/chat/    │  (Flask HTTP)  │    llm_completion_  │  (Rate-limited) │                   │  (Gemini)    │
+│              │  completions       │  :5099         │    raw()            │  Key rotation   │                   │              │
 └─────────────┘                     └──────────────┘                     └────────────────┘                     └──────────────┘
 ```
 
 ---
 
-## Files Created
+## Core Components
 
-### 1. `config.py` — Python config module
-- **Purpose:** Provides the configuration values that `llm_client.py` imports
-- **Reads from:** `.env` file (via `python-dotenv`)
-- **Exports:** `LLM_MODELS`, `GOOGLE_API_KEYS`, `LLM_REQUESTS_PER_MINUTE`, `LLM_TOKENS_PER_MINUTE`, `LLM_REQUESTS_PER_DAY`, `LLM_MAX_CONSECUTIVE_FAILURES`
-- **Auto-pads** rate limit lists to match `LLM_MODELS` length
+### 1. `config.py` — Configuration Management
+- **Purpose:** Centralized configuration for the LLM stack.
+- **Key Features:**
+  - Reads from `.env` using `python-dotenv`.
+  - Configures `GOOGLE_API_KEYS` for rotation.
+  - Sets per-model rate limits (`RPM`, `TPM`, `RPD`).
+  - Configures `LLM_RETRY_DELAY_SECONDS` for exponential backoff/retry.
+  - Sets `LLM_MAX_CONSECUTIVE_FAILURES` to define when to give up.
 
-### 2. `llm_bridge.py` — OpenAI-compatible HTTP bridge
-- **Purpose:** Bridge between OpenClaw and Python `llm_client.py`
-- **Listens on:** `http://0.0.0.0:5099`
-- **Endpoints:**
-  - `POST /v1/chat/completions` — Main chat endpoint (OpenAI format)
-  - `GET /health`, `GET /v1/models` — Health check
-- **Features:**
-  - Converts OpenAI messages array → single prompt string for `llm_completion()`
-  - Extracts system messages and passes them separately
-  - Injects tool definitions into the system prompt to guide the LLM's response
-  - Actively parses tool calls from the LLM's raw text output and converts them back into the standard OpenAI `tool_calls` format expected by OpenClaw.
+### 2. `llm_client.py` — The Inference Engine
+- **Purpose:** Robust, rate-limited interface to the Gemini API.
+- **Key Capabilities:**
+  - **Native Tool Calling:** Uses `google.genai` native types for tool definitions and function calls.
+  - **Structured Output:** Supports Pydantic-based `response_schema` enforcement.
+  - **Rate Limiting & Persistence:** Tracks usage across keys/models and persists state to `.llm_requests` (saved on exit via `atexit`).
+  - **Reliability:** Implements a round-robin retry loop across all available key/model combinations with exponential backoff.
+  - **Timeouts:** Configured with a 180s timeout (`http_options={'timeout': 180000}`) to handle high-latency "Time to First Token" scenarios.
 
-### 3. `requirements.txt` — Python dependencies
-- `google-genai>=1.0.0`
-- `tiktoken>=0.5.0`
-- `pydantic>=2.0.0`
-- `json-repair>=0.20.0`
-- `python-dotenv>=1.0.0`
+### 3. `llm_bridge.py` — OpenAI-Compatible Bridge
+- **Purpose:** Translates between OpenAI standards and Gemini's native capabilities.
+- **Endpoints:** `POST /v1/chat/completions`, `GET /v1/models`, `GET /health`.
+- **Key Features:**
+  - **Message Translation:** Correctlly maps `system`, `user`, `assistant` (with tool calls), and `tool` (responses) roles.
+  - **Native Tool Integration:** Translates OpenAI `tools` array into Gemini `FunctionDeclaration` objects.
+  - **Streaming Support:** Supports `stream: true` for both standard text and `tool_calls` using Server-Sent Events (SSE).
+  - **Schema Sanitization:** Automatically strips unsupported JSON Schema keys (e.g., `additionalProperties`, `patternProperties`) that cause Gemini API errors.
+  - **Pastel Logging:** Enhanced terminal logging with color-coded prompts and responses for easier debugging.
 
 ---
 
-## Tool Calling & OpenClaw Integration Verdict
+## Tool Calling & Interaction Logic
 
-A critical discovery was made regarding how OpenClaw handles tool calling compared to earlier assumptions:
+The integration uses **Native Tool Calling** rather than raw text parsing:
 
-1. **How OpenClaw sends tool definitions:** OpenClaw **DOES** send a `tools` array in its POST requests to `/v1/chat/completions`. It relies on standard OpenAI HTTP interactions (handled natively by its `openai-transport-stream.ts`).
-2. **How OpenClaw expects responses:** OpenClaw **DOES NOT** expect the bridge to return raw JSON text inside `choices[0].message.content`. Instead, it explicitly expects standard OpenAI `tool_calls` formatting (i.e., `choices[0].message.tool_calls`) when a tool is invoked.
-3. **The Bridge's Role:** Because `llm_client.py` natively returns raw text, `llm_bridge.py` must aggressively intercept LLM responses. If the LLM generates a JSON tool call, the bridge parses it out and correctly wraps it in `tool_calls`. Previously, a comment in the bridge claimed OpenClaw handled raw JSON directly—this was **factually incorrect**. The bridge has been updated to *always* attempt to parse tool calls from the response, ensuring flawless compatibility with OpenClaw's OpenAI transport expectations.
+1. **Definitions:** OpenClaw sends standard OpenAI tool definitions. The bridge sanitizes these (removing unsupported keys) and passes them as native Gemini `Tool` objects.
+2. **Execution:** `automatic_function_calling` is **disabled** in the client. This ensures the model *proposes* a call, which the bridge then returns to OpenClaw. OpenClaw executes the tool and sends the result back in a subsequent request with `role: "tool"`.
+3. **Response Formatting:** The bridge detects `function_call` parts in the Gemini response and formats them into the OpenAI `tool_calls` structure.
+
+---
+
+## State & Persistence
+Usage counters (Requests Per Minute, Tokens Per Minute, etc.) are stored in a local JSON file: `.llm_requests`.
+This ensures that rate limits are respected even if the bridge is restarted. The `RateLimitedLLMClient` automatically loads this on init and saves it on shutdown.
 
 ---
 
 ## How to Run
 
-### Step 1: Install Python dependencies
+### Step 1: Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 2: Start the bridge server
+### Step 2: Start the Bridge
 ```bash
 python llm_bridge.py
 ```
-This starts listening on port 5099.
+Default port is `5099`.
 
 ### Step 3: Configure OpenClaw
-Set up OpenClaw to point to the bridge as an OpenAI-compatible provider:
-- **API Base URL:** `http://localhost:5099/v1`
+- **Provider:** OpenAI (or Custom)
+- **Base URL:** `http://localhost:5099/v1`
 - **Model:** `llm-client-bridge`
-- **API Key:** Not needed (or a dummy key)
-
----
-
-## How It Works — Request Flow
-
-1. **OpenClaw** sends a standard OpenAI `POST /v1/chat/completions` request with messages, and natively includes a `tools` array.
-2. **`llm_bridge.py`** receives it and:
-   - Separates `system` messages from `user`/`assistant`/`tool` messages
-   - Converts multi-message conversation into a single prompt string
-   - Appends tool definitions to the system prompt to guide the underlying model to output correct JSON
-   - Calls `llm_completion(prompt, system=system_prompt)` from `llm_client.py`
-3. **`llm_client.py`** handles:
-   - API key rotation across all `GOOGLE_API_KEYS`
-   - Rate limiting (RPM, TPM, RPD)
-   - Calls the Gemini API via `google-genai` SDK
-4. **`llm_bridge.py`** receives the raw text response and:
-   - Actively parses the text for tool calls (`{"tool_calls": [...]}`)
-   - Wraps the response in standard OpenAI format: populating `choices[0].message.tool_calls` instead of `content` if a tool is called.
-   - Returns the standardized OpenAI response to OpenClaw.
+- **API Key:** `sk-dummy` (Required by some clients but ignored by the bridge)
